@@ -1,0 +1,173 @@
+name: 'Qualys QScanner'
+description: 'Scan container images and code repositories with Qualys QScanner and publish results to GitHub Advanced Security (SARIF).'
+author: 'Qualys'
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  access-token:
+    description: 'Qualys access token. Store it as a GitHub secret (e.g. QUALYS_ACCESS_TOKEN).'
+    required: true
+  pod:
+    description: 'Qualys platform POD, e.g. US1, US2, US3, EU1, CA1.'
+    required: true
+  scan-command:
+    description: 'QScanner command (target type) to run: image, code, image-archive, etc.'
+    required: false
+    default: 'image'
+  target:
+    description: 'Scan target. Image name/tag for `image`, path or clone URL for `code`.'
+    required: true
+  qscanner-version:
+    description: 'QScanner version to download, e.g. v4.6.0.'
+    required: true
+  scan-types:
+    description: 'Comma separated scan types (e.g. os,sca,secret). Empty uses the QScanner default.'
+    required: false
+    default: ''
+  mode:
+    description: 'QScanner mode: inventory-only, scan-only, get-report or evaluate-policy.'
+    required: false
+    default: 'get-report'
+  policy-tags:
+    description: 'Comma separated policy tags used when mode is evaluate-policy.'
+    required: false
+    default: ''
+  report-format:
+    description: 'Comma separated report formats. `sarif` is always added when upload-sarif is true.'
+    required: false
+    default: 'table,sarif'
+  output-dir:
+    description: 'Directory where QScanner writes reports. Defaults to $RUNNER_TEMP/qscanner-output.'
+    required: false
+    default: ''
+  upload-sarif:
+    description: 'Upload the SARIF report to GitHub code scanning (requires `security-events: write`).'
+    required: false
+    default: 'true'
+  sarif-category:
+    description: 'Category used for the SARIF upload.'
+    required: false
+    default: 'qualys-qscanner'
+  upload-artifact:
+    description: 'Upload the QScanner output directory as a workflow artifact.'
+    required: false
+    default: 'false'
+  fail-on-policy-deny:
+    description: 'Fail the step when policy evaluation returns DENY (exit code 42). Only relevant for mode evaluate-policy.'
+    required: false
+    default: 'true'
+  extra-args:
+    description: 'Additional global QScanner flags, appended before the command (e.g. "--exclude-dirs **/testdata").'
+    required: false
+    default: ''
+
+outputs:
+  exit-code:
+    description: 'Exit code returned by QScanner.'
+    value: ${{ steps.scan.outputs.exit-code }}
+  sarif-file:
+    description: 'Path to the generated SARIF report (empty if none).'
+    value: ${{ steps.scan.outputs.sarif-file }}
+  output-dir:
+    description: 'Directory containing QScanner output.'
+    value: ${{ steps.scan.outputs.output-dir }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download QScanner
+      shell: bash
+      env:
+        QSCANNER_VERSION: ${{ inputs.qscanner-version }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Linux) ;;
+          *) echo "::error::Only Linux runners are currently supported by this action."; exit 1 ;;
+        esac
+        mkdir -p "$RUNNER_TEMP/qscanner-bin"
+        cd "$RUNNER_TEMP/qscanner-bin"
+        curl -sSfLO "https://www.qualys.com/qscanner/download/${QSCANNER_VERSION}/download_qscanner.sh"
+        bash download_qscanner.sh
+        echo "QSCANNER_BIN=$(find "$PWD" -type f -name qscanner | head -n 1)" >> "$GITHUB_ENV"
+
+    - name: Run QScanner
+      id: scan
+      shell: bash
+      env:
+        QUALYS_ACCESS_TOKEN: ${{ inputs.access-token }}
+        IN_POD: ${{ inputs.pod }}
+        IN_COMMAND: ${{ inputs.scan-command }}
+        IN_TARGET: ${{ inputs.target }}
+        IN_SCAN_TYPES: ${{ inputs.scan-types }}
+        IN_MODE: ${{ inputs.mode }}
+        IN_POLICY_TAGS: ${{ inputs.policy-tags }}
+        IN_REPORT_FORMAT: ${{ inputs.report-format }}
+        IN_OUTPUT_DIR: ${{ inputs.output-dir }}
+        IN_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+        IN_FAIL_ON_DENY: ${{ inputs.fail-on-policy-deny }}
+        IN_EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -uo pipefail
+        OUT_DIR="${IN_OUTPUT_DIR:-$RUNNER_TEMP/qscanner-output}"
+        mkdir -p "$OUT_DIR"
+
+        FORMATS="$IN_REPORT_FORMAT"
+        if [ "$IN_UPLOAD_SARIF" = "true" ] && [[ ",$FORMATS," != *",sarif,"* ]]; then
+          FORMATS="${FORMATS:+$FORMATS,}sarif"
+        fi
+
+        ARGS=(--pod "$IN_POD" --access-token "$QUALYS_ACCESS_TOKEN" --mode "$IN_MODE" --output-dir "$OUT_DIR")
+        [ -n "$FORMATS" ] && ARGS+=(--report-format "$FORMATS")
+        [ -n "$IN_SCAN_TYPES" ] && ARGS+=(--scan-types "$IN_SCAN_TYPES")
+        [ -n "$IN_POLICY_TAGS" ] && ARGS+=(--policy-tags "$IN_POLICY_TAGS")
+        if [ -n "$IN_EXTRA_ARGS" ]; then
+          read -r -a EXTRA <<< "$IN_EXTRA_ARGS"
+          ARGS+=("${EXTRA[@]}")
+        fi
+
+        "$QSCANNER_BIN" "${ARGS[@]}" "$IN_COMMAND" "$IN_TARGET"
+        RC=$?
+
+        SARIF_FILE="$(find "$OUT_DIR" -maxdepth 1 -name '*Report.sarif.json' | head -n 1)"
+        {
+          echo "exit-code=$RC"
+          echo "sarif-file=$SARIF_FILE"
+          echo "output-dir=$OUT_DIR"
+        } >> "$GITHUB_OUTPUT"
+
+        # 42 = EXIT_POLICY_EVALUATION_DENY. Defer failure so SARIF upload still runs.
+        if [ "$RC" -eq 0 ]; then
+          exit 0
+        fi
+        if [ "$RC" -eq 42 ] && [ "$IN_FAIL_ON_DENY" != "true" ]; then
+          echo "::warning::Policy evaluation returned DENY (exit code 42)."
+          exit 0
+        fi
+        echo "FAILED_RC=$RC" >> "$GITHUB_ENV"
+        echo "::error::QScanner exited with code $RC"
+        exit 0
+
+    - name: Upload SARIF to GitHub code scanning
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif-file != '' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
+        category: ${{ inputs.sarif-category }}
+
+    - name: Upload QScanner output as artifact
+      if: ${{ always() && inputs.upload-artifact == 'true' && steps.scan.outputs.output-dir != '' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: qscanner-output
+        path: ${{ steps.scan.outputs.output-dir }}
+
+    - name: Fail on QScanner error
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        if [ -n "${FAILED_RC:-}" ]; then
+          exit "$FAILED_RC"
+        fi
