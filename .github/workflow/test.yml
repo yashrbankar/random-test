@@ -1,0 +1,34 @@
+name: Test action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate YAML
+        run: |
+          pip install pyyaml
+          python -c "import yaml;[yaml.safe_load(open(f)) for f in ['action.yml','examples/qscanner.yml']]"
+
+  smoke:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          access-token: ${{ secrets.QUALYS_ACCESS_TOKEN }}
+          pod: ${{ vars.QUALYS_POD }}
+          qscanner-version: ${{ vars.QSCANNER_VERSION }}
+          scan-command: code
+          target: .
+          fail-on-policy-deny: 'false'
