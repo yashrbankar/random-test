@@ -1,0 +1,47 @@
+name: QScanner
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  image-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t myapp:${{ github.sha }} .
+
+      - name: Scan image with QScanner
+        uses: Qualys/qscanner-action@v1
+        with:
+          access-token: ${{ secrets.QUALYS_ACCESS_TOKEN }}
+          pod: ${{ vars.QUALYS_POD }}
+          qscanner-version: v4.6.0
+          scan-command: image
+          target: myapp:${{ github.sha }}
+          mode: evaluate-policy
+          policy-tags: dev,all
+
+  code-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan source with QScanner
+        uses: Qualys/qscanner-action@v1
+        with:
+          access-token: ${{ secrets.QUALYS_ACCESS_TOKEN }}
+          pod: ${{ vars.QUALYS_POD }}
+          qscanner-version: v4.6.0
+          scan-command: code
+          target: .
+          sarif-category: qscanner-code
