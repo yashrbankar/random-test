@@ -1,34 +1,23 @@
-name: Test action
+name: Release
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 jobs:
-  lint:
+  update-major-tag:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate YAML
+      - name: Move major version tag (e.g. v1)
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          pip install pyyaml
-          python -c "import yaml;[yaml.safe_load(open(f)) for f in ['action.yml','examples/qscanner.yml']]"
-
-  smoke:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./
-        with:
-          access-token: ${{ secrets.QUALYS_ACCESS_TOKEN }}
-          pod: ${{ vars.QUALYS_POD }}
-          qscanner-version: ${{ vars.QSCANNER_VERSION }}
-          scan-command: code
-          target: .
-          fail-on-policy-deny: 'false'
+          MAJOR="${TAG%%.*}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -fa "$MAJOR" -m "Update $MAJOR to $TAG"
+          git push origin "$MAJOR" --force
